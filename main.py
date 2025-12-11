@@ -9,7 +9,7 @@ from datetime import datetime # Import to get the current timestamp
 
 # --- Configuration ---
 SENDER_EMAIL = "chetansoni9991@gmail.com"  # **CHANGE THIS**
-SENDER_PASSWORD = "hhgs znac mbuf bcqx"  # **CHANGE THIS to your Gmail App Password**
+SENDER_PASSWORD = "your-google-app-password"  # **CHANGE THIS to your Gmail App Password**
 # If you don't use an App Password, you must enable "Less secure app access" 
 # and use your regular password (Not recommended).
 
