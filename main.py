@@ -20,6 +20,38 @@ ATTACHMENT_DIR = "resume/"
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587  # Standard port for TLS
 
+# List of common public email providers to exclude from company domain matching
+COMMON_DOMAINS = {
+    'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 
+    'aol.com', 'protonmail.com', 'zoho.com', 'yandex.com', 'mail.com',
+    'msn.com', 'live.com', 'me.com', 'googlemail.com', 'rocketmail.com',
+    'btinternet.com', 'comcast.net', 'verizon.net', 'cox.net'
+}
+
+def get_sent_data(sent_file):
+    """Reads the sent-mails CSV and returns a set of emails and a set of company domains."""
+    sent_emails = set()
+    sent_domains = set()
+    
+    if os.path.exists(sent_file):
+        try:
+            with open(sent_file, mode='r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader, None) # Skip header
+                for row in reader:
+                    if row and len(row) > 0:
+                        email = row[0].strip().lower()
+                        if email and '@' in email:
+                            sent_emails.add(email)
+                            domain = email.split('@')[-1]
+                            if domain and domain not in COMMON_DOMAINS:
+                                sent_domains.add(domain)
+        except Exception as e:
+            print(f"Warning: Could not read {sent_file}: {e}")
+            
+    return sent_emails, sent_domains
+
+
 # (Functions read_template, get_attachments, and create_message remain UNCHANGED)
 
 def read_template(template_path):
@@ -126,52 +158,92 @@ def send_emails():
         print("No new recipients found in the CSV file.")
         return
 
-    print(f"Found {len(recipients_to_send)} recipient(s) to process.")
+    # 2.5. Check for duplicates and company matches in sent-mails.csv
+    sent_emails, sent_domains = get_sent_data(SENT_EMAILS_FILE)
     
-    # List to track the row indices of successfully sent emails
-    successful_row_indices = [] 
+    duplicates = []
+    company_matches = []
+    clean_recipients = []
     
+    for item in recipients_to_send:
+        email = item['email'].lower()
+        domain = email.split('@')[-1] if '@' in email else ""
+        
+        if email in sent_emails:
+            duplicates.append(item)
+        elif domain and domain in sent_domains:
+            company_matches.append(item)
+        else:
+            clean_recipients.append(item)
+            
+    successful_row_indices = [] # To keep track of rows to remove from CSV
+    
+    if duplicates or company_matches:
+        if duplicates:
+            print(f"\n[!] The following emails are already in {SENT_EMAILS_FILE}:")
+            for d in duplicates:
+                print(f"    - {d['email']}")
+        
+        if company_matches:
+            print(f"\n[!] The following emails belong to companies you've already contacted:")
+            for c in company_matches:
+                print(f"    - {c['email']}")
+                
+        choice = input("\nDo you want to remove these from email-list.csv and skip sending? (y/n): ").strip().lower()
+        if choice == 'y':
+            print("Cleaning list...")
+            skipped_indices = [d['row_index'] for d in duplicates] + [c['row_index'] for c in company_matches]
+            successful_row_indices.extend(skipped_indices)
+            recipients_to_send = clean_recipients
+            
+    if not recipients_to_send:
+        if not successful_row_indices:
+            print("No new recipients to process.")
+            return
+        else:
+            print("All recipients were removed as duplicates/already contacted. Proceeding to update the CSV file.")
+    else:
+        print(f"Found {len(recipients_to_send)} recipient(s) to process.")
+
     # 3. Connect to SMTP Server
     try:
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        
-        # 4. Send Emails, Log Success, and Record Index
-        for recipient_data in recipients_to_send:
-            recipient_email = recipient_data['email']
-            row_index = recipient_data['row_index']
+        if recipients_to_send:
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SENDER_EMAIL, SENDER_PASSWORD)
             
-            msg = create_message(recipient_email, subject, body, attachments)
-            
-            try:
-                server.sendmail(SENDER_EMAIL, recipient_email, msg.as_string())
-                print(f"Successfully sent email to: {recipient_email}")
+            # 4. Send Emails, Log Success, and Record Index
+            for recipient_data in recipients_to_send:
+                recipient_email = recipient_data['email']
+                row_index = recipient_data['row_index']
                 
-                # Log the sent email
-                log_sent_email(recipient_email, SENT_EMAILS_FILE)
+                msg = create_message(recipient_email, subject, body, attachments)
                 
-                # Record the index of the row to be removed later
-                successful_row_indices.append(row_index)
-                
-            except Exception as e:
-                print(f"Failed to send email to {recipient_email}. It will remain in the list. Error: {e}")
-                
-        # 5. Close Connection
-        server.quit()
-        print("\n--- Processing Complete ---")
+                try:
+                    server.sendmail(SENDER_EMAIL, recipient_email, msg.as_string())
+                    print(f"Successfully sent email to: {recipient_email}")
+                    
+                    # Log the sent email
+                    log_sent_email(recipient_email, SENT_EMAILS_FILE)
+                    
+                    # Record the index of the row to be removed later
+                    successful_row_indices.append(row_index)
+                    
+                except Exception as e:
+                    print(f"Failed to send email to {recipient_email}. It will remain in the list. Error: {e}")
+                    
+            # 5. Close Connection
+            server.quit()
+            print("\n--- Processing Complete ---")
         
         # 6. Update the Recipient List CSV
         if successful_row_indices:
             print(f"Removing {len(successful_row_indices)} email(s) from {EMAIL_LIST_FILE}...")
             
-            # Create a new list of rows to keep (those not successfully sent)
-            # Use a set for quick lookup of indices to remove
+            # Create a new list of rows to keep (those not successfully sent or intentionally skipped)
             indices_to_remove = set(successful_row_indices)
-            
-            # Keep rows whose index is NOT in the set of successful indices
             rows_to_keep = [row for i, row in enumerate(all_rows) if i not in indices_to_remove]
             
             # Write the remaining rows back to the original CSV file
@@ -181,7 +253,8 @@ def send_emails():
                 
             print(f"Successfully updated {EMAIL_LIST_FILE}. {len(rows_to_keep) - 1} recipient(s) remaining.")
         else:
-            print("No emails were successfully sent, so the recipient list remains unchanged.")
+            print("No changes needed for the recipient list.")
+
 
 
     except Exception as e:
