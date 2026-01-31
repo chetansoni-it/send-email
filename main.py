@@ -25,31 +25,78 @@ COMMON_DOMAINS = {
     'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 
     'aol.com', 'protonmail.com', 'zoho.com', 'yandex.com', 'mail.com',
     'msn.com', 'live.com', 'me.com', 'googlemail.com', 'rocketmail.com',
-    'btinternet.com', 'comcast.net', 'verizon.net', 'cox.net'
+    'btinternet.com', 'comcast.net', 'verizon.net', 'cox.net', 'att.net',
+    'sbcglobal.net', 'bellsouth.net', 'charter.net', 'shaw.ca', 'earthlink.net',
+    'mail.ru', 'gmx.com', 'gmx.de', 'web.de', 't-online.de', 'libero.it',
+    'virgilio.it', 'alice.it', 'wanadoo.fr', 'orange.fr', 'free.fr', 'laposte.net',
+    'rediffmail.com', 'indiatimes.com', 'tiscali.it', 'uol.com.br', 'bol.com.br',
+    'terra.com.br', 'ig.com.br', 'globomail.com', 'oi.com.br', 'sky.com',
+    'virginmedia.com', 'ntlworld.com', 'blueyonder.co.uk', 'talktalk.net'
 }
 
+def get_base_domain(domain):
+    """Simple helper to get the base domain for comparison (e.g., mail.google.com -> google.com)."""
+    if not domain:
+        return ""
+    parts = domain.split('.')
+    if len(parts) > 2:
+        # Check for common multi-part TLDs like .co.uk, .com.br, etc.
+        if parts[-2] in ('com', 'co', 'org', 'net', 'edu', 'gov', 'ac') and len(parts) >= 3:
+            return '.'.join(parts[-3:])
+        return '.'.join(parts[-2:])
+    return domain
+
 def get_sent_data(sent_file):
-    """Reads the sent-mails CSV and returns a set of emails and a set of company domains."""
+    """Reads the sent-mails CSV and returns a set of emails and a mapping of domains to contacted emails."""
     sent_emails = set()
-    sent_domains = set()
+    sent_domains_map = {} # domain -> list of emails contacted at that domain
     
     if os.path.exists(sent_file):
         try:
-            with open(sent_file, mode='r', newline='', encoding='utf-8') as f:
+            # Use utf-8-sig to handle possible BOM from Excel
+            with open(sent_file, mode='r', newline='', encoding='utf-8-sig') as f:
                 reader = csv.reader(f)
-                next(reader, None) # Skip header
+                
+                # Peek at the first row to check if it's a header
+                try:
+                    first_row = next(reader)
+                    if first_row:
+                        # If the first row looks like an email, treat it as data, not header
+                        if '@' in first_row[0]:
+                            process_row(first_row, sent_emails, sent_domains_map)
+                        # Otherwise it's likely a header, we skip it (already consumed by next())
+                except StopIteration:
+                    pass # Empty file
+                    
                 for row in reader:
-                    if row and len(row) > 0:
-                        email = row[0].strip().lower()
-                        if email and '@' in email:
-                            sent_emails.add(email)
-                            domain = email.split('@')[-1]
-                            if domain and domain not in COMMON_DOMAINS:
-                                sent_domains.add(domain)
+                    process_row(row, sent_emails, sent_domains_map)
         except Exception as e:
             print(f"Warning: Could not read {sent_file}: {e}")
             
-    return sent_emails, sent_domains
+    return sent_emails, sent_domains_map
+
+def process_row(row, sent_emails, sent_domains_map):
+    """Helper to process a single row from the sent-mails CSV."""
+    if row and len(row) > 0:
+        email = row[0].strip().lower()
+        if email and '@' in email:
+            sent_emails.add(email)
+            domain = email.split('@')[-1]
+            if domain and domain not in COMMON_DOMAINS:
+                if domain not in sent_domains_map:
+                    sent_domains_map[domain] = []
+                if email not in sent_domains_map[domain]:
+                    sent_domains_map[domain].append(email)
+                
+                # Also track base domain for subdomain matching
+                base = get_base_domain(domain)
+                if base and base != domain:
+                    if base not in sent_domains_map:
+                        sent_domains_map[base] = []
+                    if email not in sent_domains_map[base]:
+                        sent_domains_map[base].append(email)
+
+
 
 
 # (Functions read_template, get_attachments, and create_message remain UNCHANGED)
@@ -159,20 +206,25 @@ def send_emails():
         return
 
     # 2.5. Check for duplicates and company matches in sent-mails.csv
-    sent_emails, sent_domains = get_sent_data(SENT_EMAILS_FILE)
+    sent_emails, sent_domains_map = get_sent_data(SENT_EMAILS_FILE)
     
     duplicates = []
-    company_matches = []
+    company_matches = [] # list of tuples (new_item, matched_previous_email)
     clean_recipients = []
     
     for item in recipients_to_send:
         email = item['email'].lower()
         domain = email.split('@')[-1] if '@' in email else ""
+        base_domain = get_base_domain(domain)
         
         if email in sent_emails:
             duplicates.append(item)
-        elif domain and domain in sent_domains:
-            company_matches.append(item)
+        elif domain and domain in sent_domains_map:
+            # Direct domain match
+            company_matches.append((item, sent_domains_map[domain][0]))
+        elif base_domain and base_domain in sent_domains_map:
+            # Base domain match (handles subdomains)
+            company_matches.append((item, sent_domains_map[base_domain][0]))
         else:
             clean_recipients.append(item)
             
@@ -186,22 +238,27 @@ def send_emails():
         
         if company_matches:
             print(f"\n[!] The following emails belong to companies you've already contacted:")
-            for c in company_matches:
-                print(f"    - {c['email']}")
+            for c_item, prev_email in company_matches:
+                print(f"    - {c_item['email']} (Matches previous contact: {prev_email})")
                 
-        choice = input("\nDo you want to remove these from email-list.csv and skip sending? (y/n): ").strip().lower()
+        choice = input("\n[?] Found duplicates/previous company contacts. Remove them from email-list.csv and continue with others? (y/n): ").strip().lower()
         if choice == 'y':
-            print("Cleaning list...")
-            skipped_indices = [d['row_index'] for d in duplicates] + [c['row_index'] for c in company_matches]
+            print("Cleaning list and moving forward...")
+            skipped_indices = [d['row_index'] for d in duplicates] + [c[0]['row_index'] for c in company_matches]
             successful_row_indices.extend(skipped_indices)
             recipients_to_send = clean_recipients
+        else:
+            print("Aborting. No emails were sent. Please review your email-list.csv.")
+            return
+
             
     if not recipients_to_send:
         if not successful_row_indices:
             print("No new recipients to process.")
             return
         else:
-            print("All recipients were removed as duplicates/already contacted. Proceeding to update the CSV file.")
+            print("All recipients were removed as duplicates/already contacted. Updating the CSV file.")
+
     else:
         print(f"Found {len(recipients_to_send)} recipient(s) to process.")
 
