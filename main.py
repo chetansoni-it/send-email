@@ -19,6 +19,7 @@ EMAIL_LIST_PATTERN = "new-mails/linkedin_posts*.csv"
 SENT_EMAILS_FILE = "sent-mails/sent-mails.csv" # New output file path
 TEMPLATE_FILE = "template/email_body.txt"
 ATTACHMENT_DIR = "resume/"
+PORTFOLIO_LINK = "https://chetansoni-it.github.io/chetansoni-it/"
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587  # Standard port for TLS
 
@@ -128,14 +129,51 @@ def get_attachments(directory):
         print(f"Warning: Attachment directory not found at {directory}")
     return attachments
 
-def create_message(recipient_email, subject, body, attachments):
-    """Creates an email message (MIMEMultipart) with text and attachments."""
+def create_message(recipient_email, subject, body, attachments, metadata=None):
+    """Creates an email message (MIMEMultipart) with text and attachments.
+    
+    Args:
+        recipient_email: The recipient's email address
+        subject: Email subject
+        body: Email body template
+        attachments: List of file paths to attach
+        metadata: Dict containing author, content, contact_numbers, apply_links from LinkedIn post
+    """
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
     
-    msg.attach(MIMEText(body, 'plain'))
+    # Build the full email body with portfolio link and reference info
+    full_body = body
+    
+    # Add portfolio link with emphasis
+    full_body += "\n\n" + "★" * 50
+    full_body += f"\n\n📌 MY PORTFOLIO: {PORTFOLIO_LINK}\n"
+    full_body += "★" * 50
+    
+    # Add reference info from LinkedIn post if available
+    if metadata:
+        full_body += "\n\n" + "="*50
+        full_body += "\n[Reference - LinkedIn Post Details]"
+        full_body += "\n" + "="*50
+        
+        if metadata.get('author'):
+            full_body += f"\nPosted by: {metadata['author']}"
+        
+        if metadata.get('content'):
+            # Include full content - no truncation for complete backup
+            full_body += f"\n\nPost Content:\n{metadata['content']}"
+        
+        if metadata.get('contact_numbers'):
+            full_body += f"\n\nContact Numbers: {metadata['contact_numbers']}"
+        
+        if metadata.get('apply_links'):
+            full_body += f"\n\nApply Links: {metadata['apply_links']}"
+        
+        full_body += "\n" + "="*50
+    
+    msg.attach(MIMEText(full_body, 'plain'))
 
     for filepath in attachments:
         try:
@@ -153,8 +191,14 @@ def create_message(recipient_email, subject, body, attachments):
     return msg
 
 
-def log_sent_email(recipient, sent_file):
-    """Appends the recipient email and timestamp to the sent-mails log file."""
+def log_sent_email(recipient, sent_file, metadata=None):
+    """Appends the recipient email, timestamp, and LinkedIn post metadata to the sent-mails log file.
+    
+    Args:
+        recipient: The recipient's email address
+        sent_file: Path to the sent-mails CSV file
+        metadata: Dict containing author, content, contact_numbers, apply_links from LinkedIn post
+    """
     # Ensure the directory exists
     os.makedirs(os.path.dirname(sent_file), exist_ok=True)
     
@@ -166,10 +210,17 @@ def log_sent_email(recipient, sent_file):
         
         # Write header only if the file is newly created
         if not file_exists or os.path.getsize(sent_file) == 0:
-            writer.writerow(['Recipient Email', 'Date Sent'])
-            
+            writer.writerow(['Recipient Email', 'Date Sent', 'Author', 'Contact Numbers', 'Apply Links', 'Content'])
+        
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        writer.writerow([recipient, current_time])
+        
+        # Extract metadata or use empty strings
+        author = metadata.get('author', '') if metadata else ''
+        contact_numbers = metadata.get('contact_numbers', '') if metadata else ''
+        apply_links = metadata.get('apply_links', '') if metadata else ''
+        content = metadata.get('content', '') if metadata else ''
+        
+        writer.writerow([recipient, current_time, author, contact_numbers, apply_links, content])
 
 def send_emails():
     """Main function to orchestrate reading files, sending emails, logging, 
@@ -202,7 +253,7 @@ def send_emails():
                 
                 all_files_data[file_path] = [header]
                 
-                # Find the index of the "emails" column
+                # Find the index of required columns
                 header_lower = [h.strip().lower() for h in header]
                 if "emails" not in header_lower:
                     print(f"Warning: 'emails' column not found in {file_path}. Skipping.")
@@ -210,11 +261,25 @@ def send_emails():
                 
                 email_col_idx = header_lower.index("emails")
                 
+                # Find optional metadata columns
+                author_idx = header_lower.index("author") if "author" in header_lower else None
+                contact_idx = header_lower.index("contact_numbers") if "contact_numbers" in header_lower else None
+                apply_idx = header_lower.index("apply_links") if "apply_links" in header_lower else None
+                content_idx = header_lower.index("content") if "content" in header_lower else None
+                
                 for row in reader:
                     all_files_data[file_path].append(row)
                     if row and len(row) > email_col_idx:
                         email_cell = row[email_col_idx].strip()
                         if email_cell:
+                            # Extract metadata from the row
+                            metadata = {
+                                'author': row[author_idx].strip() if author_idx is not None and len(row) > author_idx else '',
+                                'contact_numbers': row[contact_idx].strip() if contact_idx is not None and len(row) > contact_idx else '',
+                                'apply_links': row[apply_idx].strip() if apply_idx is not None and len(row) > apply_idx else '',
+                                'content': row[content_idx].strip() if content_idx is not None and len(row) > content_idx else ''
+                            }
+                            
                             # Split multiple emails by comma or space
                             # We look for anything that looks like an email
                             found_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', email_cell)
@@ -222,7 +287,8 @@ def send_emails():
                                 recipients_to_send.append({
                                     'email': email.lower().strip(),
                                     'row_index': len(all_files_data[file_path]) - 1,
-                                    'file_path': file_path
+                                    'file_path': file_path,
+                                    'metadata': metadata
                                 })
         except Exception as e:
             print(f"Error reading {file_path}: {e}")
@@ -307,15 +373,16 @@ def send_emails():
                 recipient_email = recipient_data['email']
                 row_index = recipient_data['row_index']
                 file_path = recipient_data['file_path']
+                metadata = recipient_data.get('metadata', {})
                 
-                msg = create_message(recipient_email, subject, body, attachments)
+                msg = create_message(recipient_email, subject, body, attachments, metadata)
                 
                 try:
                     server.sendmail(SENDER_EMAIL, recipient_email, msg.as_string())
                     print(f"Successfully sent email to: {recipient_email}")
                     
-                    # Log the sent email
-                    log_sent_email(recipient_email, SENT_EMAILS_FILE)
+                    # Log the sent email with metadata
+                    log_sent_email(recipient_email, SENT_EMAILS_FILE, metadata)
                     
                     # Record the row to be removed
                     successful_removals.add((file_path, row_index))
