@@ -5,7 +5,9 @@ from email.mime.base import MIMEBase
 from email import encoders
 import csv
 import os
-from datetime import datetime # Import to get the current timestamp
+from datetime import datetime
+import glob
+import re
 
 # --- Configuration ---
 SENDER_EMAIL = "chetansoni9991@gmail.com"  # **CHANGE THIS**
@@ -13,7 +15,7 @@ SENDER_PASSWORD = "hhgs znac mbuf bcqx"  # **CHANGE THIS to your Gmail App Passw
 # If you don't use an App Password, you must enable "Less secure app access" 
 # and use your regular password (Not recommended).
 
-EMAIL_LIST_FILE = "email-list.csv"
+EMAIL_LIST_PATTERN = "new-mails/linkedin_posts*.csv"
 SENT_EMAILS_FILE = "sent-mails/sent-mails.csv" # New output file path
 TEMPLATE_FILE = "template/email_body.txt"
 ATTACHMENT_DIR = "resume/"
@@ -182,27 +184,51 @@ def send_emails():
     attachments = get_attachments(ATTACHMENT_DIR)
     
     # 2. Read All Recipient Data and Identify Emails to Send
-    all_rows = []
+    all_files_data = {} # file_path -> list of rows
     recipients_to_send = []
     
-    try:
-        with open(EMAIL_LIST_FILE, mode='r', newline='', encoding='utf-8') as file:
-            reader = csv.reader(file)
-            header = next(reader, None) # Get and store the header row
-            if header:
-                all_rows.append(header)
-                
-            for row in reader:
-                all_rows.append(row)
-                if row and '@' in row[0]: # Assuming email is still in the first column
-                    # Store the email along with its original row index for removal later
-                    recipients_to_send.append({'email': row[0].strip(), 'row_index': len(all_rows) - 1})
-    except FileNotFoundError:
-        print(f"Error: Recipient list CSV not found at {EMAIL_LIST_FILE}")
+    file_paths = glob.glob(EMAIL_LIST_PATTERN)
+    if not file_paths:
+        print(f"Error: No recipient lists found matching {EMAIL_LIST_PATTERN}")
         return
+
+    for file_path in file_paths:
+        try:
+            with open(file_path, mode='r', newline='', encoding='utf-8') as file:
+                reader = csv.reader(file)
+                header = next(reader, None)
+                if not header:
+                    continue
+                
+                all_files_data[file_path] = [header]
+                
+                # Find the index of the "emails" column
+                header_lower = [h.strip().lower() for h in header]
+                if "emails" not in header_lower:
+                    print(f"Warning: 'emails' column not found in {file_path}. Skipping.")
+                    continue
+                
+                email_col_idx = header_lower.index("emails")
+                
+                for row in reader:
+                    all_files_data[file_path].append(row)
+                    if row and len(row) > email_col_idx:
+                        email_cell = row[email_col_idx].strip()
+                        if email_cell:
+                            # Split multiple emails by comma or space
+                            # We look for anything that looks like an email
+                            found_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', email_cell)
+                            for email in found_emails:
+                                recipients_to_send.append({
+                                    'email': email.lower().strip(),
+                                    'row_index': len(all_files_data[file_path]) - 1,
+                                    'file_path': file_path
+                                })
+        except Exception as e:
+            print(f"Error reading {file_path}: {e}")
     
     if not recipients_to_send:
-        print("No new recipients found in the CSV file.")
+        print("No new recipients found in the CSV files.")
         return
 
     # 2.5. Check for duplicates and company matches in sent-mails.csv
@@ -228,36 +254,41 @@ def send_emails():
         else:
             clean_recipients.append(item)
             
-    successful_row_indices = [] # To keep track of rows to remove from CSV
+    # To keep track of (file_path, row_index) to remove from CSVs
+    successful_removals = set()
     
     if duplicates or company_matches:
         if duplicates:
             print(f"\n[!] The following emails are already in {SENT_EMAILS_FILE}:")
-            for d in duplicates:
-                print(f"    - {d['email']}")
+            # Use a set to show unique emails in the warning
+            for email_str in sorted(set(d['email'] for d in duplicates)):
+                print(f"    - {email_str}")
         
         if company_matches:
             print(f"\n[!] The following emails belong to companies you've already contacted:")
+            # Use a set to show unique emails in the warning
             for c_item, prev_email in company_matches:
                 print(f"    - {c_item['email']} (Matches previous contact: {prev_email})")
                 
-        choice = input("\n[?] Found duplicates/previous company contacts. Remove them from email-list.csv and continue with others? (y/n): ").strip().lower()
+        choice = input("\n[?] Found duplicates/previous company contacts. Remove those rows from source files and continue with others? (y/n): ").strip().lower()
         if choice == 'y':
             print("Cleaning list and moving forward...")
-            skipped_indices = [d['row_index'] for d in duplicates] + [c[0]['row_index'] for c in company_matches]
-            successful_row_indices.extend(skipped_indices)
+            for d in duplicates:
+                successful_removals.add((d['file_path'], d['row_index']))
+            for c_item, prev_email in company_matches:
+                successful_removals.add((c_item['file_path'], c_item['row_index']))
             recipients_to_send = clean_recipients
         else:
-            print("Aborting. No emails were sent. Please review your email-list.csv.")
+            print("Aborting. No emails were sent. Please review your source files.")
             return
 
             
     if not recipients_to_send:
-        if not successful_row_indices:
+        if not successful_removals:
             print("No new recipients to process.")
             return
         else:
-            print("All recipients were removed as duplicates/already contacted. Updating the CSV file.")
+            print("All recipients were removed as duplicates/already contacted. Updating the source files.")
 
     else:
         print(f"Found {len(recipients_to_send)} recipient(s) to process.")
@@ -275,6 +306,7 @@ def send_emails():
             for recipient_data in recipients_to_send:
                 recipient_email = recipient_data['email']
                 row_index = recipient_data['row_index']
+                file_path = recipient_data['file_path']
                 
                 msg = create_message(recipient_email, subject, body, attachments)
                 
@@ -285,8 +317,8 @@ def send_emails():
                     # Log the sent email
                     log_sent_email(recipient_email, SENT_EMAILS_FILE)
                     
-                    # Record the index of the row to be removed later
-                    successful_row_indices.append(row_index)
+                    # Record the row to be removed
+                    successful_removals.add((file_path, row_index))
                     
                 except Exception as e:
                     print(f"Failed to send email to {recipient_email}. It will remain in the list. Error: {e}")
@@ -295,22 +327,26 @@ def send_emails():
             server.quit()
             print("\n--- Processing Complete ---")
         
-        # 6. Update the Recipient List CSV
-        if successful_row_indices:
-            print(f"Removing {len(successful_row_indices)} email(s) from {EMAIL_LIST_FILE}...")
+        # 6. Update the Source CSV files
+        if successful_removals:
+            # Group removals by file
+            removals_by_file = {}
+            for f_path, r_idx in successful_removals:
+                if f_path not in removals_by_file:
+                    removals_by_file[f_path] = set()
+                removals_by_file[f_path].add(r_idx)
             
-            # Create a new list of rows to keep (those not successfully sent or intentionally skipped)
-            indices_to_remove = set(successful_row_indices)
-            rows_to_keep = [row for i, row in enumerate(all_rows) if i not in indices_to_remove]
-            
-            # Write the remaining rows back to the original CSV file
-            with open(EMAIL_LIST_FILE, mode='w', newline='', encoding='utf-8') as file:
-                writer = csv.writer(file)
-                writer.writerows(rows_to_keep)
+            for file_path, indices_to_remove in removals_by_file.items():
+                print(f"Removing {len(indices_to_remove)} row(s) from {file_path}...")
+                current_rows = all_files_data[file_path]
+                rows_to_keep = [row for i, row in enumerate(current_rows) if i not in indices_to_remove]
                 
-            print(f"Successfully updated {EMAIL_LIST_FILE}. {len(rows_to_keep) - 1} recipient(s) remaining.")
+                with open(file_path, mode='w', newline='', encoding='utf-8') as file:
+                    writer = csv.writer(file)
+                    writer.writerows(rows_to_keep)
+                print(f"Successfully updated {file_path}. {len(rows_to_keep) - 1} row(s) remaining.")
         else:
-            print("No changes needed for the recipient list.")
+            print("No changes needed for the source files.")
 
 
 
